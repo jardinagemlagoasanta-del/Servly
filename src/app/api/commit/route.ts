@@ -9,7 +9,17 @@ const execAsync = promisify(exec);
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { action, repoPath, commits, message, initRepoName } = body;
+    const { 
+      action, 
+      repoPath, 
+      commits, 
+      message, 
+      initRepoName, 
+      pushToGithub, 
+      githubRepoUrl, 
+      githubBranch, 
+      forcePush 
+    } = body;
 
     if (!repoPath) {
       return NextResponse.json({ error: "O caminho do repositório é obrigatório." }, { status: 400 });
@@ -55,16 +65,15 @@ export async function POST(req: NextRequest) {
       const logs: string[] = [];
       let totalCreated = 0;
 
+      // Executa a criação de todos os commits locais
       for (const item of commits) {
         const { date, count } = item;
         const commitMsg = item.message || message || "chore: update history";
         const commitCount = count || 1;
 
-        // Formata a data para ISO String compatível com o Git
         const formattedDate = new Date(date).toISOString();
 
         for (let i = 0; i < commitCount; i++) {
-          // Usamos variáveis de ambiente para forçar a data tanto do Author quanto do Committer
           const env = {
             ...process.env,
             GIT_AUTHOR_DATE: formattedDate,
@@ -78,9 +87,56 @@ export async function POST(req: NextRequest) {
         logs.push(`Criado(s) ${commitCount} commit(s) em ${new Date(date).toLocaleDateString()} ${new Date(date).toLocaleTimeString()}`);
       }
 
+      // Executa o Push automático para o GitHub caso solicitado
+      if (pushToGithub && githubRepoUrl) {
+        const token = req.cookies.get("github_token")?.value;
+
+        if (!token) {
+          return NextResponse.json({ 
+            success: true,
+            message: `Commits criados localmente (${totalCreated}), mas o Push falhou: Usuário não autenticado.`,
+            logs: [...logs, "Erro: Token de acesso do GitHub não encontrado. Conecte sua conta."]
+          });
+        }
+
+        // Formata a URL do repositório injetando o token de acesso
+        let authenticatedUrl = githubRepoUrl;
+        if (githubRepoUrl.startsWith("https://github.com/")) {
+          authenticatedUrl = githubRepoUrl.replace("https://github.com/", `https://${token}@github.com/`);
+        }
+
+        const targetBranch = githubBranch || "main";
+        const forceFlag = forcePush ? "--force" : "";
+        logs.push(`Iniciando push para ${githubRepoUrl} (branch: ${targetBranch})...`);
+
+        try {
+          // Renomeia branch local para bater com a branch de destino se necessário
+          // (Garante que HEAD aponte para a branch correta localmente antes do push)
+          try {
+            await execAsync(`git checkout -b ${targetBranch}`, { cwd: resolvedPath });
+          } catch {
+            await execAsync(`git checkout ${targetBranch}`, { cwd: resolvedPath });
+          }
+
+          const pushCmd = `git push "${authenticatedUrl}" ${targetBranch} ${forceFlag}`;
+          await execAsync(pushCmd, { cwd: resolvedPath });
+          logs.push(`Push executado com sucesso para a branch ${targetBranch}!`);
+        } catch (pushErr: any) {
+          console.error("Erro ao fazer push:", pushErr);
+          logs.push(`Erro no Push: ${pushErr.message || "Erro desconhecido"}`);
+          return NextResponse.json({
+            success: true,
+            message: `Commits criados localmente (${totalCreated}), mas o push para o GitHub falhou.`,
+            logs,
+          });
+        }
+      }
+
       return NextResponse.json({
         success: true,
-        message: `Sucesso! ${totalCreated} commits criados no repositório.`,
+        message: pushToGithub 
+          ? `Sucesso! ${totalCreated} commits criados e enviados para o GitHub.`
+          : `Sucesso! ${totalCreated} commits criados localmente.`,
         logs,
       });
     }

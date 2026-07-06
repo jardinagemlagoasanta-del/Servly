@@ -8,7 +8,23 @@ interface CommitDay {
   count: number;
 }
 
+interface GitHubUser {
+  name: string;
+  login: string;
+  avatarUrl: string;
+}
+
+interface GitHubRepo {
+  id: number;
+  name: string;
+  fullName: string;
+  cloneUrl: string;
+  private: boolean;
+  defaultBranch: string;
+}
+
 export default function Home() {
+  // App States
   const [repoPath, setRepoPath] = useState("");
   const [action, setAction] = useState<"commit" | "init">("commit");
   const [initRepoName, setInitRepoName] = useState("");
@@ -20,22 +36,105 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState({ text: "", type: "" });
 
+  // GitHub Auth States
+  const [authState, setAuthState] = useState<{
+    authenticated: boolean;
+    user: GitHubUser | null;
+    repos: GitHubRepo[];
+    loginUrl: string;
+  }>({
+    authenticated: false,
+    user: null,
+    repos: [],
+    loginUrl: "",
+  });
+
+  // Push options
+  const [pushToGithub, setPushToGithub] = useState(false);
+  const [selectedRepoUrl, setSelectedRepoUrl] = useState("");
+  const [selectedBranch, setSelectedBranch] = useState("main");
+  const [forcePush, setForcePush] = useState(false);
+
   // Range selection state
   const [startDateStr, setStartDateStr] = useState("");
   const [endDateStr, setEndDateStr] = useState("");
   const [rangeCommits, setRangeCommits] = useState(2);
 
+  // Fetch GitHub User & Repos on mount
+  useEffect(() => {
+    async function fetchUser() {
+      try {
+        const response = await fetch("/api/auth/user");
+        const data = await response.json();
+        if (data.authenticated) {
+          setAuthState({
+            authenticated: true,
+            user: data.user,
+            repos: data.repos || [],
+            loginUrl: "",
+          });
+          // Se houver repositórios, seleciona o primeiro por padrão
+          if (data.repos && data.repos.length > 0) {
+            setSelectedRepoUrl(data.repos[0].cloneUrl);
+            setSelectedBranch(data.repos[0].defaultBranch || "main");
+          }
+        } else {
+          setAuthState((prev) => ({ ...prev, loginUrl: data.loginUrl }));
+        }
+      } catch (err) {
+        console.error("Erro ao verificar autenticação:", err);
+      }
+    }
+    fetchUser();
+  }, []);
+
+  // Handle Repo Dropdown Selection
+  const handleRepoSelect = (repoUrl: string) => {
+    setSelectedRepoUrl(repoUrl);
+    const foundRepo = authState.repos.find((r) => r.cloneUrl === repoUrl);
+    if (foundRepo) {
+      setSelectedBranch(foundRepo.defaultBranch || "main");
+      // Sugere o nome da pasta do repositório no caminho local se o usuário já tiver digitado um caminho base
+      if (repoPath) {
+        const parts = repoPath.replace(/\\/g, "/").split("/");
+        // Substitui o último segmento pelo nome do repositório
+        if (parts.length > 1) {
+          parts[parts.length - 1] = foundRepo.name;
+          setRepoPath(parts.join("/"));
+        }
+      }
+    }
+  };
+
+  // Logout function
+  const handleLogout = async () => {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+      setAuthState({
+        authenticated: false,
+        user: null,
+        repos: [],
+        loginUrl: "",
+      });
+      setPushToGithub(false);
+      // Recarrega para obter nova loginUrl
+      const response = await fetch("/api/auth/user");
+      const data = await response.json();
+      setAuthState((prev) => ({ ...prev, loginUrl: data.loginUrl }));
+    } catch (err) {
+      console.error("Erro no logout:", err);
+    }
+  };
+
   // Generate last 371 days (53 weeks) ending on the current Saturday
   const gridDays = useMemo(() => {
     const days: CommitDay[] = [];
     const today = new Date();
-    const dayOfWeek = today.getDay(); // 0 is Sunday, 6 is Saturday
+    const dayOfWeek = today.getDay();
     
-    // We want the grid to end on the upcoming Saturday (or today if today is Saturday)
     const endDate = new Date(today);
     endDate.setDate(today.getDate() + (6 - dayOfWeek));
     
-    // Go back 53 weeks (53 * 7 = 371 days)
     const startDate = new Date(endDate);
     startDate.setDate(endDate.getDate() - 370);
 
@@ -130,7 +229,6 @@ export default function Home() {
   const fillRandom = () => {
     const newDates: { [key: string]: number } = {};
     gridDays.forEach((day) => {
-      // 30% chance of commit
       if (Math.random() < 0.3) {
         const intensities = [1, 3, 6, 10];
         newDates[day.dateStr] = intensities[Math.floor(Math.random() * intensities.length)];
@@ -153,7 +251,7 @@ export default function Home() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!repoPath) {
-      setStatusMessage({ text: "O caminho do repositório é obrigatório.", type: "error" });
+      setStatusMessage({ text: "O caminho do repositório local é obrigatório.", type: "error" });
       return;
     }
 
@@ -163,7 +261,6 @@ export default function Home() {
 
     try {
       const commitList = Object.entries(selectedDates).map(([dateStr, count]) => {
-        // Combinar a data do grid com o horário selecionado
         const dateTimeStr = `${dateStr}T${commitTime}`;
         return {
           date: dateTimeStr,
@@ -187,6 +284,10 @@ export default function Home() {
           commits: commitList,
           message: commitMessage,
           initRepoName: action === "init" ? initRepoName : undefined,
+          pushToGithub,
+          githubRepoUrl: pushToGithub ? selectedRepoUrl : undefined,
+          githubBranch: pushToGithub ? selectedBranch : undefined,
+          forcePush: pushToGithub ? forcePush : undefined,
         }),
       });
 
@@ -202,7 +303,7 @@ export default function Home() {
           setAction("commit");
         }
       } else {
-        setStatusMessage({ text: data.error || "Ocorreu um erro ao processar requisição.", type: "error" });
+        setStatusMessage({ text: data.error || "Ocorreu um erro ao processar a requisição.", type: "error" });
       }
     } catch (err: any) {
       setStatusMessage({ text: err.message || "Erro de conexão com o servidor.", type: "error" });
@@ -213,6 +314,7 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-emerald-500 selection:text-slate-950">
+      
       {/* Header */}
       <header className="border-b border-slate-900 bg-slate-900/50 backdrop-blur sticky top-0 z-50 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -221,11 +323,43 @@ export default function Home() {
           </div>
           <div>
             <h1 className="font-bold text-lg leading-none tracking-tight">Git Chronos</h1>
-            <span className="text-xs text-slate-500 font-medium">Manipulador de Linha do Tempo</span>
+            <span className="text-xs text-slate-500 font-medium">Autenticação & Controle de Commits</span>
           </div>
         </div>
-        <div className="text-xs text-slate-400 bg-slate-900 px-3 py-1.5 rounded-full border border-slate-800">
-          Status: <span className="text-emerald-400 font-semibold">Local Server</span>
+
+        {/* Auth Section */}
+        <div className="flex items-center gap-4">
+          {authState.authenticated && authState.user ? (
+            <div className="flex items-center gap-3 bg-slate-900 border border-slate-800 rounded-xl p-1.5 pr-4">
+              <img
+                src={authState.user.avatarUrl}
+                alt={authState.user.name}
+                className="h-8 w-8 rounded-lg border border-slate-700 object-cover"
+              />
+              <div className="flex flex-col">
+                <span className="text-xs font-bold leading-none text-slate-200">{authState.user.name}</span>
+                <span className="text-[10px] text-slate-500 font-medium">@{authState.user.login}</span>
+              </div>
+              <button
+                onClick={handleLogout}
+                className="ml-2 text-xs text-rose-400 hover:text-rose-300 font-semibold px-2 py-1 rounded-lg hover:bg-rose-950/20 transition-all"
+              >
+                Sair
+              </button>
+            </div>
+          ) : (
+            authState.loginUrl && (
+              <a
+                href={authState.loginUrl}
+                className="text-xs font-bold bg-slate-900 hover:bg-slate-800 text-slate-200 px-4 py-2 rounded-xl border border-slate-800 flex items-center gap-2 transition-all shadow-md"
+              >
+                <svg className="h-4 w-4 fill-current" viewBox="0 0 24 24">
+                  <path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.3 24 12c0-6.63-5.37-12-12-12z" />
+                </svg>
+                Conectar com GitHub
+              </a>
+            )
+          )}
         </div>
       </header>
 
@@ -237,14 +371,14 @@ export default function Home() {
           <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/5 rounded-full blur-3xl -mr-16 -mt-16 pointer-events-none"></div>
           <h2 className="text-2xl font-bold mb-2">Simule seu Histórico de Contribuições</h2>
           <p className="text-slate-400 text-sm max-w-2xl leading-relaxed">
-            Selecione um repositório Git local, configure as datas desejadas no gráfico interativo abaixo ou defina um intervalo, e crie commits retroativos com facilidade.
+            Selecione um repositório Git local, conecte com o GitHub para enviar diretamente, e crie commits retroativos com total controle visual sobre as datas.
           </p>
         </section>
 
         {/* Git Path and Action Setup */}
         <section className="grid md:grid-cols-3 gap-6">
           <div className="md:col-span-2 bg-slate-900/40 border border-slate-900 rounded-2xl p-6 flex flex-col gap-4">
-            <h3 className="font-semibold text-sm uppercase tracking-wider text-slate-400">Configuração do Repositório</h3>
+            <h3 className="font-semibold text-sm uppercase tracking-wider text-slate-400">Configuração do Repositório Local</h3>
             
             <div className="flex flex-col gap-2">
               <label className="text-xs font-semibold text-slate-300">Caminho Absoluto da Pasta Local</label>
@@ -278,13 +412,13 @@ export default function Home() {
                     : "border-transparent text-slate-400 hover:text-white"
                 }`}
               >
-                Inicializar Novo Repo
+                Inicializar Novo Repo Local
               </button>
             </div>
 
             {action === "init" && (
               <div className="flex flex-col gap-2 animate-fadeIn">
-                <label className="text-xs font-semibold text-slate-300">Nome da Nova Pasta do Repositório (Opcional)</label>
+                <label className="text-xs font-semibold text-slate-300">Nome da Nova Pasta (Opcional)</label>
                 <input
                   type="text"
                   value={initRepoName}
@@ -296,25 +430,83 @@ export default function Home() {
             )}
           </div>
 
+          {/* GitHub Auto-Push Integration */}
           <div className="bg-slate-900/40 border border-slate-900 rounded-2xl p-6 flex flex-col justify-between gap-4">
             <div>
-              <h3 className="font-semibold text-sm uppercase tracking-wider text-slate-400 mb-4">Ações Rápidas do Grid</h3>
-              <p className="text-xs text-slate-400 mb-4">
-                Use esses utilitários para desenhar ou limpar o gráfico de contribuição rapidamente.
-              </p>
+              <h3 className="font-semibold text-sm uppercase tracking-wider text-slate-400 mb-2">Envio Automático (GitHub)</h3>
+              {authState.authenticated ? (
+                <div className="flex flex-col gap-3 mt-3">
+                  <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={pushToGithub}
+                      onChange={(e) => setPushToGithub(e.target.checked)}
+                      className="rounded border-slate-800 bg-slate-950 text-emerald-500 focus:ring-0"
+                    />
+                    Habilitar Push Automático
+                  </label>
+
+                  {pushToGithub && (
+                    <div className="flex flex-col gap-2 mt-1 animate-fadeIn">
+                      <label className="text-[10px] uppercase font-bold text-slate-500">Selecione o Repositório Remoto</label>
+                      <select
+                        value={selectedRepoUrl}
+                        onChange={(e) => handleRepoSelect(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-emerald-500"
+                      >
+                        {authState.repos.map((repo) => (
+                          <option key={repo.id} value={repo.cloneUrl}>
+                            {repo.fullName} {repo.private ? "(Privado)" : ""}
+                          </option>
+                        ))}
+                      </select>
+
+                      <div className="grid grid-cols-2 gap-2 mt-1">
+                        <div>
+                          <label className="text-[9px] uppercase font-bold text-slate-500">Branch Destino</label>
+                          <input
+                            type="text"
+                            value={selectedBranch}
+                            onChange={(e) => setSelectedBranch(e.target.value)}
+                            placeholder="main"
+                            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+
+                        <div className="flex flex-col justify-end pb-1">
+                          <label className="flex items-center gap-1.5 text-[10px] font-semibold cursor-pointer text-rose-400">
+                            <input
+                              type="checkbox"
+                              checked={forcePush}
+                              onChange={(e) => setForcePush(e.target.checked)}
+                              className="rounded border-slate-800 bg-slate-950 text-rose-500 focus:ring-0"
+                            />
+                            Forçar Push
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="mt-4 p-4 bg-slate-950/40 border border-slate-800 rounded-xl text-xs text-slate-400 text-center">
+                  Conecte sua conta do GitHub no cabeçalho acima para habilitar o push automático direto para a nuvem.
+                </div>
+              )}
             </div>
+            
             <div className="flex flex-col gap-2">
               <button
                 type="button"
                 onClick={fillRandom}
-                className="w-full bg-slate-950 border border-slate-800 hover:border-emerald-500/50 hover:bg-slate-900 text-slate-300 text-xs font-semibold py-2.5 rounded-xl transition-all"
+                className="w-full bg-slate-950 border border-slate-800 hover:border-emerald-500/50 hover:bg-slate-900 text-slate-300 text-xs font-semibold py-2 rounded-xl transition-all"
               >
-                Gerar Padrão Aleatório (30%)
+                Padrão Aleatório (30%)
               </button>
               <button
                 type="button"
                 onClick={clearGrid}
-                className="w-full bg-slate-950 border border-slate-800 hover:border-rose-500/50 hover:bg-slate-900 text-slate-300 text-xs font-semibold py-2.5 rounded-xl transition-all"
+                className="w-full bg-slate-950 border border-slate-800 hover:border-rose-500/50 hover:bg-slate-900 text-slate-300 text-xs font-semibold py-2 rounded-xl transition-all"
               >
                 Limpar Gráfico
               </button>
@@ -330,7 +522,6 @@ export default function Home() {
               <p className="text-xs text-slate-400">Clique nos blocos para adicionar ou remover commits daquele dia específico.</p>
             </div>
             
-            {/* Color Legend */}
             <div className="flex items-center gap-2 text-xs text-slate-400">
               <span>Menos</span>
               <div className="h-3 w-3 rounded bg-zinc-800"></div>
@@ -432,8 +623,10 @@ export default function Home() {
                   </>
                 ) : action === "init" ? (
                   "Inicializar Repositório Git"
+                ) : pushToGithub ? (
+                  `Gerar e Enviar ${Object.values(selectedDates).reduce((a, b) => a + b, 0)} Commits`
                 ) : (
-                  `Gerar ${Object.values(selectedDates).reduce((a, b) => a + b, 0)} Commits`
+                  `Gerar ${Object.values(selectedDates).reduce((a, b) => a + b, 0)} Commits Locais`
                 )}
               </button>
             </form>
