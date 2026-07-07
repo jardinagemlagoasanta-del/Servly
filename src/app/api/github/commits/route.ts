@@ -6,6 +6,9 @@ interface CommitDetail {
   repoFullName: string;
   date: string;
   url: string;
+  authorName: string;
+  authorLogin: string;
+  authorAvatarUrl: string;
 }
 
 export async function GET(req: NextRequest) {
@@ -128,7 +131,7 @@ export async function GET(req: NextRequest) {
 
         while (hasMoreCommits) {
           try {
-            let commitUrl = `https://api.github.com/repos/${repo.full_name}/commits?author=${login}&since=${sinceISO}&per_page=100&page=${commitPage}`;
+            let commitUrl = `https://api.github.com/repos/${repo.full_name}/commits?since=${sinceISO}&per_page=100&page=${commitPage}`;
             if (untilISO) {
               commitUrl += `&until=${untilISO}`;
             }
@@ -165,6 +168,9 @@ export async function GET(req: NextRequest) {
                     repoFullName: repo.full_name,
                     date: commitDate,
                     url: commit.html_url || "",
+                    authorName: commit.commit?.author?.name || commit.author?.login || "Unknown",
+                    authorLogin: commit.author?.login || commit.commit?.author?.name || "unknown",
+                    authorAvatarUrl: commit.author?.avatar_url || "",
                   });
                 }
               }

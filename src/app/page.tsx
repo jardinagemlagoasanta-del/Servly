@@ -32,6 +32,9 @@ interface CommitDetail {
   repoFullName: string;
   date: string;
   url: string;
+  authorName: string;
+  authorLogin: string;
+  authorAvatarUrl: string;
 }
 
 export default function Home() {
@@ -983,6 +986,16 @@ export default function Home() {
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-1">
+                        {commit.authorAvatarUrl && (
+                          <img
+                            src={commit.authorAvatarUrl}
+                            alt={commit.authorLogin}
+                            className="h-5 w-5 rounded-full ring-1 ring-slate-700"
+                          />
+                        )}
+                        <span className="text-[10px] font-semibold text-slate-300 truncate">
+                          {commit.authorName || commit.authorLogin}
+                        </span>
                         <span className="text-[10px] font-mono bg-slate-800 text-emerald-400 px-2 py-0.5 rounded-md">
                           {commit.sha.substring(0, 7)}
                         </span>

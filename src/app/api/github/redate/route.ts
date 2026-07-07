@@ -21,6 +21,26 @@ export async function POST(req: NextRequest) {
   const logs: string[] = [];
 
   try {
+    // Buscar dados do usuário logado no GitHub
+    const userRes = await fetch("https://api.github.com/user", {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+        "User-Agent": "GitChronos-App",
+      },
+    });
+
+    if (!userRes.ok) {
+      return NextResponse.json(
+        { error: "Falha ao obter dados do usuário no GitHub." },
+        { status: 401 }
+      );
+    }
+
+    const userData = await userRes.json();
+    const authorName = userData.name || userData.login;
+    const authorEmail = userData.email || `${userData.id}+${userData.login}@users.noreply.github.com`;
+
     const body = await req.json();
     const { repoFullName, commitSha, newDate, branch } = body;
 
@@ -101,10 +121,14 @@ export async function POST(req: NextRequest) {
         ...process.env,
         GIT_AUTHOR_DATE: formattedDate,
         GIT_COMMITTER_DATE: formattedDate,
+        GIT_AUTHOR_NAME: authorName,
+        GIT_AUTHOR_EMAIL: authorEmail,
+        GIT_COMMITTER_NAME: authorName,
+        GIT_COMMITTER_EMAIL: authorEmail,
       };
 
       await execAsync(
-        `git commit --amend --no-edit --date="${formattedDate}"`,
+        `git commit --amend --no-edit --date="${formattedDate}" --author="${authorName} <${authorEmail}>"`,
         { cwd: repoDir, env }
       );
 
@@ -126,6 +150,10 @@ export async function POST(req: NextRequest) {
         "then",
         `    export GIT_AUTHOR_DATE="${formattedDate}"`,
         `    export GIT_COMMITTER_DATE="${formattedDate}"`,
+        `    export GIT_AUTHOR_NAME="${authorName}"`,
+        `    export GIT_AUTHOR_EMAIL="${authorEmail}"`,
+        `    export GIT_COMMITTER_NAME="${authorName}"`,
+        `    export GIT_COMMITTER_EMAIL="${authorEmail}"`,
         "fi",
         "",
       ].join("\n");
