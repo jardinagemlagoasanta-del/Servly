@@ -5,13 +5,16 @@ import React, { useState, useEffect, useMemo } from "react";
 interface CommitDay {
   dateStr: string;
   date: Date;
-  count: number;
+  existingCount: number;
+  newCount: number;
+  totalCount: number;
 }
 
 interface GitHubUser {
   name: string;
   login: string;
   avatarUrl: string;
+  createdAt?: string;
 }
 
 interface GitHubRepo {
@@ -23,11 +26,16 @@ interface GitHubRepo {
   defaultBranch: string;
 }
 
+interface CommitDetail {
+  sha: string;
+  message: string;
+  repoFullName: string;
+  date: string;
+  url: string;
+}
+
 export default function Home() {
   // App States
-  const [repoPath, setRepoPath] = useState("");
-  const [action, setAction] = useState<"commit" | "init">("commit");
-  const [initRepoName, setInitRepoName] = useState("");
   const [commitMessage, setCommitMessage] = useState("chore: update history");
   const [commitTime, setCommitTime] = useState("12:00:00");
   const [commitsPerDay, setCommitsPerDay] = useState(1);
@@ -36,29 +44,46 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState({ text: "", type: "" });
 
-  // GitHub Auth States
+  // GitHub Auth & Contributions States
   const [authState, setAuthState] = useState<{
     authenticated: boolean;
     user: GitHubUser | null;
     repos: GitHubRepo[];
     loginUrl: string;
+    githubContributions: { [key: string]: number };
   }>({
     authenticated: false,
     user: null,
     repos: [],
     loginUrl: "",
+    githubContributions: {},
   });
 
-  // Push options
-  const [pushToGithub, setPushToGithub] = useState(false);
-  const [selectedRepoUrl, setSelectedRepoUrl] = useState("");
+  // Selected repo for creating commits (destination)
+  const [selectedRepoFullName, setSelectedRepoFullName] = useState("");
   const [selectedBranch, setSelectedBranch] = useState("main");
   const [forcePush, setForcePush] = useState(false);
+
+  // Selected repo for viewing commits in the graph
+  const [viewRepoFullName, setViewRepoFullName] = useState("");
+  const [repoCommitCounts, setRepoCommitCounts] = useState<{ [key: string]: number }>({});
+  const [loadingRepoCommits, setLoadingRepoCommits] = useState(false);
+  const [selectedYear, setSelectedYear] = useState<number>(new Date().getFullYear());
 
   // Range selection state
   const [startDateStr, setStartDateStr] = useState("");
   const [endDateStr, setEndDateStr] = useState("");
   const [rangeCommits, setRangeCommits] = useState(2);
+
+  // Commit details modal states
+  const [githubCommitDetails, setGithubCommitDetails] = useState<{ [date: string]: CommitDetail[] }>({});
+  const [selectedDay, setSelectedDay] = useState("");
+  const [showCommitModal, setShowCommitModal] = useState(false);
+  const [redateLoading, setRedateLoading] = useState(false);
+  const [redateTarget, setRedateTarget] = useState<{ sha: string; repoFullName: string } | null>(null);
+  const [newDateForCommit, setNewDateForCommit] = useState("");
+  const [redateLogs, setRedateLogs] = useState<string[]>([]);
+  const [loadingCommitDetails, setLoadingCommitDetails] = useState(false);
 
   // Fetch GitHub User & Repos on mount
   useEffect(() => {
@@ -72,11 +97,13 @@ export default function Home() {
             user: data.user,
             repos: data.repos || [],
             loginUrl: "",
+            githubContributions: data.githubContributions || {},
           });
-          // Se houver repositórios, seleciona o primeiro por padrão
+          // Set default selected repo
           if (data.repos && data.repos.length > 0) {
-            setSelectedRepoUrl(data.repos[0].cloneUrl);
+            setSelectedRepoFullName(data.repos[0].fullName);
             setSelectedBranch(data.repos[0].defaultBranch || "main");
+            setViewRepoFullName(data.repos[0].fullName);
           }
         } else {
           setAuthState((prev) => ({ ...prev, loginUrl: data.loginUrl }));
@@ -88,22 +115,54 @@ export default function Home() {
     fetchUser();
   }, []);
 
-  // Handle Repo Dropdown Selection
-  const handleRepoSelect = (repoUrl: string) => {
-    setSelectedRepoUrl(repoUrl);
-    const foundRepo = authState.repos.find((r) => r.cloneUrl === repoUrl);
+  // Fetch commits when viewRepoFullName or selectedYear changes
+  useEffect(() => {
+    if (viewRepoFullName && authState.authenticated) {
+      fetchRepoCommits(viewRepoFullName, selectedYear);
+    }
+  }, [viewRepoFullName, selectedYear, authState.authenticated]);
+
+  // Fetch commits for a specific repo (for graph display)
+  const fetchRepoCommits = async (repoFullName: string, year: number) => {
+    setLoadingRepoCommits(true);
+    setLoadingCommitDetails(true);
+    try {
+      const res = await fetch(`/api/github/commits?repo=${encodeURIComponent(repoFullName)}&year=${year}`);
+      const data = await res.json();
+      if (res.ok && data.commitsByDate) {
+        setGithubCommitDetails(data.commitsByDate);
+        // Build count map for graph
+        const counts: { [key: string]: number } = {};
+        for (const [date, commits] of Object.entries(data.commitsByDate)) {
+          counts[date] = (commits as CommitDetail[]).length;
+        }
+        setRepoCommitCounts(counts);
+      } else {
+        setGithubCommitDetails({});
+        setRepoCommitCounts({});
+      }
+    } catch (err) {
+      console.error("Erro ao buscar commits do repo:", err);
+      setGithubCommitDetails({});
+      setRepoCommitCounts({});
+    } finally {
+      setLoadingRepoCommits(false);
+      setLoadingCommitDetails(false);
+    }
+  };
+
+  // Handle Repo Dropdown Selection (for commits destination)
+  const handleRepoSelect = (repoFullName: string) => {
+    setSelectedRepoFullName(repoFullName);
+    const foundRepo = authState.repos.find((r) => r.fullName === repoFullName);
     if (foundRepo) {
       setSelectedBranch(foundRepo.defaultBranch || "main");
-      // Sugere o nome da pasta do repositório no caminho local se o usuário já tiver digitado um caminho base
-      if (repoPath) {
-        const parts = repoPath.replace(/\\/g, "/").split("/");
-        // Substitui o último segmento pelo nome do repositório
-        if (parts.length > 1) {
-          parts[parts.length - 1] = foundRepo.name;
-          setRepoPath(parts.join("/"));
-        }
-      }
     }
+  };
+
+  // Handle view repo selection (for graph display)
+  const handleViewRepoSelect = (repoFullName: string) => {
+    setViewRepoFullName(repoFullName);
   };
 
   // Logout function
@@ -115,9 +174,10 @@ export default function Home() {
         user: null,
         repos: [],
         loginUrl: "",
+        githubContributions: {},
       });
-      setPushToGithub(false);
-      // Recarrega para obter nova loginUrl
+      setRepoCommitCounts({});
+      setGithubCommitDetails({});
       const response = await fetch("/api/auth/user");
       const data = await response.json();
       setAuthState((prev) => ({ ...prev, loginUrl: data.loginUrl }));
@@ -126,30 +186,54 @@ export default function Home() {
     }
   };
 
-  // Generate last 371 days (53 weeks) ending on the current Saturday
+  // Generate days based on selectedYear
   const gridDays = useMemo(() => {
     const days: CommitDay[] = [];
-    const today = new Date();
-    const dayOfWeek = today.getDay();
+    const currentYear = new Date().getFullYear();
     
-    const endDate = new Date(today);
-    endDate.setDate(today.getDate() + (6 - dayOfWeek));
+    let startDate: Date;
+    let endDate: Date;
     
-    const startDate = new Date(endDate);
-    startDate.setDate(endDate.getDate() - 370);
+    if (selectedYear === currentYear) {
+      // Show trailing 12 months (last 371 days) ending on the current Saturday
+      const today = new Date();
+      const dayOfWeek = today.getDay();
+      
+      endDate = new Date(today);
+      endDate.setDate(today.getDate() + (6 - dayOfWeek));
+      
+      startDate = new Date(endDate);
+      startDate.setDate(endDate.getDate() - 370);
+    } else {
+      // Show calendar year for selectedYear (Jan 1 to Dec 31, aligned to Sunday-Saturday weeks)
+      startDate = new Date(selectedYear, 0, 1);
+      const startDayOfWeek = startDate.getDay();
+      startDate.setDate(startDate.getDate() - startDayOfWeek); // Roll back to Sunday
+      
+      endDate = new Date(selectedYear, 11, 31);
+      const endDayOfWeek = endDate.getDay();
+      endDate.setDate(endDate.getDate() + (6 - endDayOfWeek)); // Roll forward to Saturday
+    }
 
     const current = new Date(startDate);
     while (current <= endDate) {
       const dateStr = current.toISOString().split("T")[0];
+      
+      const existingCount = repoCommitCounts[dateStr] || 0;
+      const newCount = selectedDates[dateStr] || 0;
+      const totalCount = existingCount + newCount;
+
       days.push({
         dateStr,
         date: new Date(current),
-        count: selectedDates[dateStr] || 0,
+        existingCount,
+        newCount,
+        totalCount,
       });
       current.setDate(current.getDate() + 1);
     }
     return days;
-  }, [selectedDates]);
+  }, [selectedYear, selectedDates, repoCommitCounts]);
 
   // Group days into weeks for column layout
   const weeks = useMemo(() => {
@@ -167,8 +251,43 @@ export default function Home() {
     return cols;
   }, [gridDays]);
 
+  // Total contribution count in the currently selected grid
+  const totalContributions = useMemo(() => {
+    return gridDays.reduce((sum, day) => sum + day.totalCount, 0);
+  }, [gridDays]);
+
+  // List of years to display in the switch (current year down to user's creation year, or current - 4 fallback)
+  const yearsList = useMemo(() => {
+    const current = new Date().getFullYear();
+    let startYear = current - 4;
+    
+    if (authState.user?.createdAt) {
+      const createdYear = new Date(authState.user.createdAt).getFullYear();
+      if (createdYear < current) {
+        startYear = createdYear;
+      }
+    }
+    
+    const list = [];
+    for (let y = current; y >= startYear; y--) {
+      list.push(y);
+    }
+    return list;
+  }, [authState.user?.createdAt]);
+
   // Toggle/Increment commit count for a specific day
   const handleDayClick = (dateStr: string) => {
+    // If there are existing commits for this day, open modal
+    const dayCommits = githubCommitDetails[dateStr];
+    if (dayCommits && dayCommits.length > 0) {
+      setSelectedDay(dateStr);
+      setShowCommitModal(true);
+      setRedateTarget(null);
+      setNewDateForCommit("");
+      setRedateLogs([]);
+      return;
+    }
+
     setSelectedDates((prev) => {
       const current = prev[dateStr] || 0;
       let next = 0;
@@ -186,6 +305,47 @@ export default function Home() {
       }
       return updated;
     });
+  };
+
+  // Handle redate commit
+  const handleRedateCommit = async () => {
+    if (!redateTarget || !newDateForCommit) return;
+
+    setRedateLoading(true);
+    setRedateLogs([]);
+
+    try {
+      const res = await fetch("/api/github/redate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          repoFullName: redateTarget.repoFullName,
+          commitSha: redateTarget.sha,
+          newDate: newDateForCommit,
+          branch: selectedBranch,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (data.logs) {
+        setRedateLogs(data.logs);
+      }
+
+      if (res.ok) {
+        setStatusMessage({ text: data.message || "Data alterada com sucesso!", type: "success" });
+        // Refresh commit details for the current repo
+        if (viewRepoFullName) {
+          await fetchRepoCommits(viewRepoFullName, selectedYear);
+        }
+      } else {
+        setStatusMessage({ text: data.error || "Erro ao alterar data do commit.", type: "error" });
+      }
+    } catch (err: any) {
+      setStatusMessage({ text: err.message || "Erro de conexão.", type: "error" });
+    } finally {
+      setRedateLoading(false);
+    }
   };
 
   // Apply batch commits to a date range
@@ -247,11 +407,26 @@ export default function Home() {
     return "bg-emerald-400 border-emerald-300 hover:bg-emerald-300";
   };
 
-  // Submit action to backend API
+  // Submit commits to the cloud
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!repoPath) {
-      setStatusMessage({ text: "O caminho do repositório local é obrigatório.", type: "error" });
+
+    if (!selectedRepoFullName) {
+      setStatusMessage({ text: "Selecione um repositório de destino.", type: "error" });
+      return;
+    }
+
+    const commitList = Object.entries(selectedDates).map(([dateStr, count]) => {
+      const dateTimeStr = `${dateStr}T${commitTime}`;
+      return {
+        date: dateTimeStr,
+        count,
+        message: commitMessage,
+      };
+    });
+
+    if (commitList.length === 0) {
+      setStatusMessage({ text: "Selecione pelo menos um dia no gráfico para criar commits.", type: "error" });
       return;
     }
 
@@ -260,34 +435,14 @@ export default function Home() {
     setLogs([]);
 
     try {
-      const commitList = Object.entries(selectedDates).map(([dateStr, count]) => {
-        const dateTimeStr = `${dateStr}T${commitTime}`;
-        return {
-          date: dateTimeStr,
-          count,
-          message: commitMessage,
-        };
-      });
-
-      if (action === "commit" && commitList.length === 0) {
-        setStatusMessage({ text: "Selecione pelo menos um dia no grid para criar commits.", type: "error" });
-        setLoading(false);
-        return;
-      }
-
       const response = await fetch("/api/commit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          action,
-          repoPath,
+          repoFullName: selectedRepoFullName,
+          branch: selectedBranch,
           commits: commitList,
-          message: commitMessage,
-          initRepoName: action === "init" ? initRepoName : undefined,
-          pushToGithub,
-          githubRepoUrl: pushToGithub ? selectedRepoUrl : undefined,
-          githubBranch: pushToGithub ? selectedBranch : undefined,
-          forcePush: pushToGithub ? forcePush : undefined,
+          forcePush,
         }),
       });
 
@@ -298,12 +453,15 @@ export default function Home() {
         if (data.logs) {
           setLogs(data.logs);
         }
-        if (action === "init" && data.path) {
-          setRepoPath(data.path);
-          setAction("commit");
+        // Refresh the graph if we're viewing the same repo
+        if (viewRepoFullName === selectedRepoFullName) {
+          setTimeout(() => fetchRepoCommits(viewRepoFullName, selectedYear), 2000);
         }
       } else {
         setStatusMessage({ text: data.error || "Ocorreu um erro ao processar a requisição.", type: "error" });
+        if (data.logs) {
+          setLogs(data.logs);
+        }
       }
     } catch (err: any) {
       setStatusMessage({ text: err.message || "Erro de conexão com o servidor.", type: "error" });
@@ -312,6 +470,81 @@ export default function Home() {
     }
   };
 
+  // If not authenticated, show login screen
+  if (!authState.authenticated) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-emerald-500 selection:text-slate-950">
+        {/* Header */}
+        <header className="border-b border-slate-900 bg-slate-900/50 backdrop-blur sticky top-0 z-50 px-6 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="h-8 w-8 rounded-lg bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center font-bold text-slate-950 shadow-lg shadow-emerald-500/20">
+              G
+            </div>
+            <div>
+              <h1 className="font-bold text-lg leading-none tracking-tight">Git Chronos</h1>
+              <span className="text-xs text-slate-500 font-medium">Visualização & Controle de Histórico</span>
+            </div>
+          </div>
+        </header>
+
+        {/* Login CTA */}
+        <main className="flex-1 flex items-center justify-center p-6">
+          <div className="max-w-md w-full text-center space-y-8">
+            <div className="space-y-4">
+              <div className="h-20 w-20 rounded-2xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center font-bold text-slate-950 text-3xl shadow-2xl shadow-emerald-500/20 mx-auto">
+                G
+              </div>
+              <h2 className="text-3xl font-bold">Bem-vindo ao Git Chronos</h2>
+              <p className="text-slate-400 text-sm leading-relaxed max-w-sm mx-auto">
+                Gerencie seu histórico de contribuições do GitHub diretamente na nuvem. Crie commits retroativos, altere datas e visualize seu gráfico — tudo sem repositório local.
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              {authState.loginUrl ? (
+                <a
+                  href={authState.loginUrl}
+                  className="inline-flex items-center gap-3 bg-slate-900 hover:bg-slate-800 text-slate-100 font-bold px-8 py-4 rounded-2xl border border-slate-800 transition-all shadow-xl hover:shadow-2xl hover:shadow-emerald-500/5 text-sm"
+                >
+                  <svg className="h-5 w-5 fill-current" viewBox="0 0 24 24">
+                    <path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.3 24 12c0-6.63-5.37-12-12-12z" />
+                  </svg>
+                  Conectar com GitHub
+                </a>
+              ) : (
+                <div className="flex items-center justify-center gap-3 text-slate-500 text-sm">
+                  <div className="h-4 w-4 border-2 border-slate-500 border-t-transparent rounded-full animate-spin" />
+                  Carregando...
+                </div>
+              )}
+            </div>
+
+            <div className="grid grid-cols-3 gap-4 pt-4">
+              <div className="bg-slate-900/40 border border-slate-900 rounded-xl p-4 text-center">
+                <div className="text-emerald-400 text-lg font-bold mb-1">☁️</div>
+                <p className="text-[10px] text-slate-400 font-medium">100% na Nuvem</p>
+              </div>
+              <div className="bg-slate-900/40 border border-slate-900 rounded-xl p-4 text-center">
+                <div className="text-emerald-400 text-lg font-bold mb-1">📅</div>
+                <p className="text-[10px] text-slate-400 font-medium">Commits Retroativos</p>
+              </div>
+              <div className="bg-slate-900/40 border border-slate-900 rounded-xl p-4 text-center">
+                <div className="text-emerald-400 text-lg font-bold mb-1">🔄</div>
+                <p className="text-[10px] text-slate-400 font-medium">Alterar Datas</p>
+              </div>
+            </div>
+          </div>
+        </main>
+
+        {/* Footer */}
+        <footer className="border-t border-slate-900 bg-slate-950 px-6 py-6 text-center text-xs text-slate-600">
+          <p>© 2026 Git Chronos. Gerencie seu histórico de contribuições na nuvem.</p>
+        </footer>
+      </div>
+    );
+  }
+
+  // Authenticated view
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-emerald-500 selection:text-slate-950">
       
@@ -323,43 +556,29 @@ export default function Home() {
           </div>
           <div>
             <h1 className="font-bold text-lg leading-none tracking-tight">Git Chronos</h1>
-            <span className="text-xs text-slate-500 font-medium">Autenticação & Controle de Commits</span>
+            <span className="text-xs text-slate-500 font-medium">Visualização & Controle de Histórico</span>
           </div>
         </div>
 
         {/* Auth Section */}
         <div className="flex items-center gap-4">
-          {authState.authenticated && authState.user ? (
-            <div className="flex items-center gap-3 bg-slate-900 border border-slate-800 rounded-xl p-1.5 pr-4">
-              <img
-                src={authState.user.avatarUrl}
-                alt={authState.user.name}
-                className="h-8 w-8 rounded-lg border border-slate-700 object-cover"
-              />
-              <div className="flex flex-col">
-                <span className="text-xs font-bold leading-none text-slate-200">{authState.user.name}</span>
-                <span className="text-[10px] text-slate-500 font-medium">@{authState.user.login}</span>
-              </div>
-              <button
-                onClick={handleLogout}
-                className="ml-2 text-xs text-rose-400 hover:text-rose-300 font-semibold px-2 py-1 rounded-lg hover:bg-rose-950/20 transition-all"
-              >
-                Sair
-              </button>
+          <div className="flex items-center gap-3 bg-slate-900 border border-slate-800 rounded-xl p-1.5 pr-4">
+            <img
+              src={authState.user!.avatarUrl}
+              alt={authState.user!.name}
+              className="h-8 w-8 rounded-lg border border-slate-700 object-cover"
+            />
+            <div className="flex flex-col">
+              <span className="text-xs font-bold leading-none text-slate-200">{authState.user!.name}</span>
+              <span className="text-[10px] text-slate-500 font-medium">@{authState.user!.login}</span>
             </div>
-          ) : (
-            authState.loginUrl && (
-              <a
-                href={authState.loginUrl}
-                className="text-xs font-bold bg-slate-900 hover:bg-slate-800 text-slate-200 px-4 py-2 rounded-xl border border-slate-800 flex items-center gap-2 transition-all shadow-md"
-              >
-                <svg className="h-4 w-4 fill-current" viewBox="0 0 24 24">
-                  <path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.3 24 12c0-6.63-5.37-12-12-12z" />
-                </svg>
-                Conectar com GitHub
-              </a>
-            )
-          )}
+            <button
+              onClick={handleLogout}
+              className="ml-2 text-xs text-rose-400 hover:text-rose-300 font-semibold px-2 py-1 rounded-lg hover:bg-rose-950/20 transition-all"
+            >
+              Sair
+            </button>
+          </div>
         </div>
       </header>
 
@@ -369,190 +588,212 @@ export default function Home() {
         {/* Intro */}
         <section className="bg-gradient-to-r from-slate-900 to-slate-950 border border-slate-900 rounded-2xl p-6 relative overflow-hidden">
           <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/5 rounded-full blur-3xl -mr-16 -mt-16 pointer-events-none"></div>
-          <h2 className="text-2xl font-bold mb-2">Simule seu Histórico de Contribuições</h2>
+          <h2 className="text-2xl font-bold mb-2">Gerencie seu Histórico na Nuvem</h2>
           <p className="text-slate-400 text-sm max-w-2xl leading-relaxed">
-            Selecione um repositório Git local, conecte com o GitHub para enviar diretamente, e crie commits retroativos com total controle visual sobre as datas.
+            Selecione um repositório do GitHub, visualize seus commits no gráfico de contribuição e crie commits retroativos diretamente na nuvem — sem necessidade de repositório local.
           </p>
         </section>
 
-        {/* Git Path and Action Setup */}
+        {/* Repository Selection & Push Config */}
         <section className="grid md:grid-cols-3 gap-6">
           <div className="md:col-span-2 bg-slate-900/40 border border-slate-900 rounded-2xl p-6 flex flex-col gap-4">
-            <h3 className="font-semibold text-sm uppercase tracking-wider text-slate-400">Configuração do Repositório Local</h3>
+            <h3 className="font-semibold text-sm uppercase tracking-wider text-slate-400">Repositório de Destino</h3>
             
             <div className="flex flex-col gap-2">
-              <label className="text-xs font-semibold text-slate-300">Caminho Absoluto da Pasta Local</label>
-              <input
-                type="text"
-                value={repoPath}
-                onChange={(e) => setRepoPath(e.target.value)}
-                placeholder="Ex: C:\Users\Nome\Projetos\meu-repositorio"
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500 transition-colors placeholder:text-slate-600"
-              />
+              <label className="text-xs font-semibold text-slate-300">Selecione o Repositório</label>
+              <select
+                value={selectedRepoFullName}
+                onChange={(e) => handleRepoSelect(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500 transition-colors"
+              >
+                {authState.repos.map((repo) => (
+                  <option key={repo.id} value={repo.fullName}>
+                    {repo.fullName} {repo.private ? "(Privado)" : ""}
+                  </option>
+                ))}
+              </select>
             </div>
 
-            <div className="flex gap-4 mt-2">
-              <button
-                type="button"
-                onClick={() => setAction("commit")}
-                className={`flex-1 py-3 px-4 rounded-xl border text-sm font-semibold transition-all ${
-                  action === "commit"
-                    ? "bg-slate-800 border-slate-700 text-white"
-                    : "border-transparent text-slate-400 hover:text-white"
-                }`}
-              >
-                Trabalhar em Repo Existente
-              </button>
-              <button
-                type="button"
-                onClick={() => setAction("init")}
-                className={`flex-1 py-3 px-4 rounded-xl border text-sm font-semibold transition-all ${
-                  action === "init"
-                    ? "bg-slate-800 border-slate-700 text-white"
-                    : "border-transparent text-slate-400 hover:text-white"
-                }`}
-              >
-                Inicializar Novo Repo Local
-              </button>
-            </div>
-
-            {action === "init" && (
-              <div className="flex flex-col gap-2 animate-fadeIn">
-                <label className="text-xs font-semibold text-slate-300">Nome da Nova Pasta (Opcional)</label>
+            <div className="grid grid-cols-2 gap-4 mt-2">
+              <div className="flex flex-col gap-2">
+                <label className="text-xs font-semibold text-slate-300">Branch de Destino</label>
                 <input
                   type="text"
-                  value={initRepoName}
-                  onChange={(e) => setInitRepoName(e.target.value)}
-                  placeholder="Deixe em branco para usar a própria pasta especificada"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500 transition-colors placeholder:text-slate-600"
+                  value={selectedBranch}
+                  onChange={(e) => setSelectedBranch(e.target.value)}
+                  placeholder="main"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500 transition-colors"
                 />
               </div>
-            )}
+
+              <div className="flex flex-col gap-2 justify-end">
+                <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer text-rose-400 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3">
+                  <input
+                    type="checkbox"
+                    checked={forcePush}
+                    onChange={(e) => setForcePush(e.target.checked)}
+                    className="rounded border-slate-800 bg-slate-950 text-rose-500 focus:ring-0"
+                  />
+                  Forçar Push (--force)
+                </label>
+              </div>
+            </div>
           </div>
 
-          {/* GitHub Auto-Push Integration */}
-          <div className="bg-slate-900/40 border border-slate-900 rounded-2xl p-6 flex flex-col justify-between gap-4">
-            <div>
-              <h3 className="font-semibold text-sm uppercase tracking-wider text-slate-400 mb-2">Envio Automático (GitHub)</h3>
-              {authState.authenticated ? (
-                <div className="flex flex-col gap-3 mt-3">
-                  <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={pushToGithub}
-                      onChange={(e) => setPushToGithub(e.target.checked)}
-                      className="rounded border-slate-800 bg-slate-950 text-emerald-500 focus:ring-0"
-                    />
-                    Habilitar Push Automático
-                  </label>
+        </section>
 
-                  {pushToGithub && (
-                    <div className="flex flex-col gap-2 mt-1 animate-fadeIn">
-                      <label className="text-[10px] uppercase font-bold text-slate-500">Selecione o Repositório Remoto</label>
-                      <select
-                        value={selectedRepoUrl}
-                        onChange={(e) => handleRepoSelect(e.target.value)}
-                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-emerald-500"
+        {/* Gráfico de Contribuição com Switch de Anos */}
+        <div className="flex flex-col lg:flex-row gap-6 items-start w-full">
+          {/* Contribution Graph Section */}
+          <section className="flex-1 bg-slate-900/20 border border-slate-900 rounded-2xl p-6 flex flex-col gap-6 w-full lg:max-w-[calc(100%-120px)] overflow-hidden">
+            <div className="flex items-center justify-between flex-wrap gap-4">
+              <div className="flex items-center gap-6">
+                <div>
+                  <h3 className="font-bold text-base">
+                    {totalContributions} {totalContributions === 1 ? "contribuição" : "contribuições"}{" "}
+                    {selectedYear === new Date().getFullYear() ? "no último ano" : `em ${selectedYear}`}
+                  </h3>
+                  <p className="text-xs text-slate-400">Clique nos blocos para adicionar commits na data correspondente.</p>
+                </div>
+
+                {/* Repo Filter for Graph */}
+                <div className="flex flex-col gap-1">
+                  <label className="text-[10px] uppercase font-bold text-slate-500">Visualizar Repo</label>
+                  <select
+                    value={viewRepoFullName}
+                    onChange={(e) => handleViewRepoSelect(e.target.value)}
+                    className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1 text-xs focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="">Nenhum (limpo)</option>
+                    {authState.repos.map((repo) => (
+                      <option key={repo.id} value={repo.fullName}>
+                        {repo.fullName}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {loadingRepoCommits && (
+                  <div className="flex items-center gap-2 text-xs text-slate-500">
+                    <div className="h-3 w-3 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+                    Carregando...
+                  </div>
+                )}
+              </div>
+              
+              <div className="flex items-center gap-2 text-xs text-slate-400">
+                <span>Menos</span>
+                <div className="h-3 w-3 rounded bg-zinc-800"></div>
+                <div className="h-3 w-3 rounded bg-emerald-900"></div>
+                <div className="h-3 w-3 rounded bg-emerald-700"></div>
+                <div className="h-3 w-3 rounded bg-emerald-500"></div>
+                <div className="h-3 w-3 rounded bg-emerald-400"></div>
+                <span>Mais</span>
+              </div>
+            </div>
+
+            {/* Grid Container */}
+            <div className="w-full overflow-x-auto pb-2">
+              <div className="min-w-max p-1">
+                {/* Month Labels Row */}
+                <div className="flex" style={{ marginLeft: '28px' }}>
+                  {(() => {
+                    const labels: { text: string; colSpan: number }[] = [];
+                    let prevLabel = '';
+                    weeks.forEach((week) => {
+                      // Use the first day of each week to determine month
+                      const firstDay = week[0];
+                      const monthNames = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+                      const m = firstDay.date.getMonth();
+                      const y = firstDay.date.getFullYear();
+                      const label = `${monthNames[m]}`;
+                      const fullLabel = `${monthNames[m]} ${y}`;
+                      if (label !== prevLabel) {
+                        labels.push({ text: fullLabel, colSpan: 1 });
+                        prevLabel = label;
+                      } else {
+                        labels[labels.length - 1].colSpan += 1;
+                      }
+                    });
+                    return labels.map((l, i) => (
+                      <span
+                        key={i}
+                        className="text-[10px] text-slate-500 leading-none"
+                        style={{
+                          width: `${l.colSpan * 14}px`,
+                          flexShrink: 0,
+                          textAlign: 'left',
+                          paddingLeft: '2px',
+                        }}
                       >
-                        {authState.repos.map((repo) => (
-                          <option key={repo.id} value={repo.cloneUrl}>
-                            {repo.fullName} {repo.private ? "(Privado)" : ""}
-                          </option>
-                        ))}
-                      </select>
+                        {l.colSpan >= 3 ? l.text : ''}
+                      </span>
+                    ));
+                  })()}
+                </div>
 
-                      <div className="grid grid-cols-2 gap-2 mt-1">
-                        <div>
-                          <label className="text-[9px] uppercase font-bold text-slate-500">Branch Destino</label>
-                          <input
-                            type="text"
-                            value={selectedBranch}
-                            onChange={(e) => setSelectedBranch(e.target.value)}
-                            placeholder="main"
-                            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-emerald-500"
+                {/* Day labels + Grid */}
+                <div className="flex">
+                  {/* Day-of-week labels */}
+                  <div className="flex flex-col gap-[3px] mr-1 pt-0" style={{ width: '24px', flexShrink: 0 }}>
+                    {['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'].map((dayName, i) => (
+                      <span
+                        key={dayName}
+                        className="text-[9px] text-slate-500 leading-none flex items-center"
+                        style={{ height: '11px' }}
+                      >
+                        {i % 2 === 1 ? dayName : ''}
+                      </span>
+                    ))}
+                  </div>
+
+                  {/* Contribution squares */}
+                  <div className="flex gap-[3px]">
+                    {weeks.map((week, wIndex) => (
+                      <div key={wIndex} className="flex flex-col gap-[3px]">
+                        {week.map((day) => (
+                          <button
+                            key={day.dateStr}
+                            onClick={() => handleDayClick(day.dateStr)}
+                            title={`${new Date(day.date).toLocaleDateString("pt-BR", {
+                              weekday: "long",
+                              year: "numeric",
+                              month: "long",
+                              day: "numeric",
+                            })}: ${day.existingCount} existentes + ${day.newCount} novos = ${day.totalCount} total`}
+                            className={`h-[11px] w-[11px] rounded-[2px] transition-colors border-[0.5px] ${getColorClass(
+                              day.totalCount
+                            )}`}
                           />
-                        </div>
-
-                        <div className="flex flex-col justify-end pb-1">
-                          <label className="flex items-center gap-1.5 text-[10px] font-semibold cursor-pointer text-rose-400">
-                            <input
-                              type="checkbox"
-                              checked={forcePush}
-                              onChange={(e) => setForcePush(e.target.checked)}
-                              className="rounded border-slate-800 bg-slate-950 text-rose-500 focus:ring-0"
-                            />
-                            Forçar Push
-                          </label>
-                        </div>
+                        ))}
                       </div>
-                    </div>
-                  )}
+                    ))}
+                  </div>
                 </div>
-              ) : (
-                <div className="mt-4 p-4 bg-slate-950/40 border border-slate-800 rounded-xl text-xs text-slate-400 text-center">
-                  Conecte sua conta do GitHub no cabeçalho acima para habilitar o push automático direto para a nuvem.
-                </div>
-              )}
+              </div>
             </div>
-            
-            <div className="flex flex-col gap-2">
-              <button
-                type="button"
-                onClick={fillRandom}
-                className="w-full bg-slate-950 border border-slate-800 hover:border-emerald-500/50 hover:bg-slate-900 text-slate-300 text-xs font-semibold py-2 rounded-xl transition-all"
-              >
-                Padrão Aleatório (30%)
-              </button>
-              <button
-                type="button"
-                onClick={clearGrid}
-                className="w-full bg-slate-950 border border-slate-800 hover:border-rose-500/50 hover:bg-slate-900 text-slate-300 text-xs font-semibold py-2 rounded-xl transition-all"
-              >
-                Limpar Gráfico
-              </button>
-            </div>
-          </div>
-        </section>
+          </section>
 
-        {/* Contribution Graph Section */}
-        <section className="bg-slate-900/20 border border-slate-900 rounded-2xl p-6 flex flex-col gap-6">
-          <div className="flex items-center justify-between flex-wrap gap-4">
-            <div>
-              <h3 className="font-bold text-base">Gráfico de Contribuição</h3>
-              <p className="text-xs text-slate-400">Clique nos blocos para adicionar ou remover commits daquele dia específico.</p>
-            </div>
-            
-            <div className="flex items-center gap-2 text-xs text-slate-400">
-              <span>Menos</span>
-              <div className="h-3 w-3 rounded bg-zinc-800"></div>
-              <div className="h-3 w-3 rounded bg-emerald-900"></div>
-              <div className="h-3 w-3 rounded bg-emerald-700"></div>
-              <div className="h-3 w-3 rounded bg-emerald-500"></div>
-              <div className="h-3 w-3 rounded bg-emerald-400"></div>
-              <span>Mais</span>
-            </div>
+          {/* Switch de Anos */}
+          <div className="flex flex-row lg:flex-col gap-1.5 w-full lg:w-28 shrink-0 overflow-x-auto lg:overflow-visible pb-2 lg:pb-0">
+            {yearsList.map((y) => {
+              const isActive = selectedYear === y;
+              return (
+                <button
+                  key={y}
+                  onClick={() => setSelectedYear(y)}
+                  className={`px-4 py-2 rounded-lg text-xs font-semibold transition-all text-center lg:text-left ${
+                    isActive
+                      ? "bg-blue-600 text-white shadow-lg shadow-blue-600/15"
+                      : "text-slate-400 hover:text-slate-200 hover:bg-slate-900/40"
+                  }`}
+                >
+                  {y}
+                </button>
+              );
+            })}
           </div>
-
-          {/* Grid Container */}
-          <div className="w-full overflow-x-auto pb-2">
-            <div className="flex gap-[3px] min-w-max p-1">
-              {weeks.map((week, wIndex) => (
-                <div key={wIndex} className="flex flex-col gap-[3px]">
-                  {week.map((day) => (
-                    <button
-                      key={day.dateStr}
-                      onClick={() => handleDayClick(day.dateStr)}
-                      title={`${day.date.toLocaleDateString()}: ${day.count} commits`}
-                      className={`h-[11px] w-[11px] rounded-[2px] transition-colors border-[0.5px] ${getColorClass(
-                        day.count
-                      )}`}
-                    />
-                  ))}
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
+        </div>
 
         {/* Range Selection & Details Form */}
         <section className="grid md:grid-cols-2 gap-8">
@@ -619,14 +860,10 @@ export default function Home() {
                 {loading ? (
                   <>
                     <div className="h-4 w-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin"></div>
-                    Executando comandos Git...
+                    Clonando, criando commits e enviando...
                   </>
-                ) : action === "init" ? (
-                  "Inicializar Repositório Git"
-                ) : pushToGithub ? (
-                  `Gerar e Enviar ${Object.values(selectedDates).reduce((a, b) => a + b, 0)} Commits`
                 ) : (
-                  `Gerar ${Object.values(selectedDates).reduce((a, b) => a + b, 0)} Commits Locais`
+                  `Gerar e Enviar ${Object.values(selectedDates).reduce((a, b) => a + b, 0)} Commits`
                 )}
               </button>
             </form>
@@ -698,9 +935,163 @@ export default function Home() {
 
       </main>
 
+      {/* Commit Details Modal */}
+      {showCommitModal && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center p-4"
+          onClick={() => setShowCommitModal(false)}
+        >
+          {/* Backdrop */}
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
+
+          {/* Modal Content */}
+          <div
+            className="relative w-full max-w-2xl max-h-[85vh] bg-slate-900/95 backdrop-blur-xl border border-slate-700/50 rounded-2xl shadow-2xl shadow-black/50 flex flex-col animate-[modalIn_0.25s_ease-out]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800">
+              <div>
+                <h3 className="font-bold text-lg text-slate-100">
+                  Commits em{" "}
+                  {new Date(selectedDay + "T12:00:00").toLocaleDateString("pt-BR", {
+                    weekday: "long",
+                    year: "numeric",
+                    month: "long",
+                    day: "numeric",
+                  })}
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  {githubCommitDetails[selectedDay]?.length || 0} commit(s) encontrado(s)
+                </p>
+              </div>
+              <button
+                onClick={() => setShowCommitModal(false)}
+                className="h-8 w-8 flex items-center justify-center rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors text-lg"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Commits List */}
+            <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3">
+              {(githubCommitDetails[selectedDay] || []).map((commit) => (
+                <div
+                  key={`${commit.repoFullName}-${commit.sha}`}
+                  className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 hover:border-slate-700 transition-colors"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-[10px] font-mono bg-slate-800 text-emerald-400 px-2 py-0.5 rounded-md">
+                          {commit.sha.substring(0, 7)}
+                        </span>
+                        <span className="text-[10px] text-slate-500 font-medium truncate">
+                          {commit.repoFullName}
+                        </span>
+                      </div>
+                      <p className="text-sm text-slate-200 font-medium truncate">
+                        {commit.message}
+                      </p>
+                      <p className="text-[10px] text-slate-500 mt-1">
+                        {new Date(commit.date).toLocaleString("pt-BR")}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      {commit.url && (
+                        <a
+                          href={commit.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-[10px] text-slate-400 hover:text-emerald-400 transition-colors px-2 py-1 rounded-lg hover:bg-slate-800"
+                        >
+                          Ver ↗
+                        </a>
+                      )}
+                      <button
+                        onClick={() => {
+                          if (redateTarget?.sha === commit.sha) {
+                            setRedateTarget(null);
+                            setNewDateForCommit("");
+                          } else {
+                            setRedateTarget({ sha: commit.sha, repoFullName: commit.repoFullName });
+                            setNewDateForCommit("");
+                            setRedateLogs([]);
+                          }
+                        }}
+                        className={`text-[10px] font-semibold px-3 py-1.5 rounded-lg transition-all ${
+                          redateTarget?.sha === commit.sha
+                            ? "bg-amber-500/20 text-amber-400 border border-amber-500/30"
+                            : "bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700"
+                        }`}
+                      >
+                        Alterar Data
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Redate form for this commit */}
+                  {redateTarget?.sha === commit.sha && (
+                    <div className="mt-3 pt-3 border-t border-slate-800 space-y-3 animate-[modalIn_0.15s_ease-out]">
+                      <div className="bg-amber-950/30 border border-amber-900/50 rounded-lg p-3">
+                        <p className="text-[10px] text-amber-400 font-semibold flex items-center gap-1.5">
+                          ⚠️ Atenção: Isso fará force push e reescreverá o histórico do repositório.
+                        </p>
+                      </div>
+
+                      <div className="flex items-end gap-3">
+                        <div className="flex-1 flex flex-col gap-1.5">
+                          <label className="text-[10px] font-semibold text-slate-400 uppercase">Nova Data e Horário</label>
+                          <input
+                            type="datetime-local"
+                            value={newDateForCommit}
+                            onChange={(e) => setNewDateForCommit(e.target.value)}
+                            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-emerald-500 transition-colors"
+                          />
+                        </div>
+                        <button
+                          onClick={handleRedateCommit}
+                          disabled={redateLoading || !newDateForCommit}
+                          className="bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 font-bold text-xs px-5 py-2.5 rounded-lg transition-all disabled:opacity-40 hover:opacity-90 flex items-center gap-2 shrink-0"
+                        >
+                          {redateLoading ? (
+                            <>
+                              <div className="h-3 w-3 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
+                              Processando...
+                            </>
+                          ) : (
+                            "Confirmar Alteração"
+                          )}
+                        </button>
+                      </div>
+
+                      {/* Redate logs */}
+                      {redateLogs.length > 0 && (
+                        <div className="bg-black/60 rounded-lg p-3 font-mono text-[10px] text-emerald-400 max-h-[120px] overflow-y-auto border border-slate-900">
+                          {redateLogs.map((log, i) => (
+                            <div key={i} className="leading-relaxed">{`> ${log}`}</div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              {(!githubCommitDetails[selectedDay] || githubCommitDetails[selectedDay].length === 0) && (
+                <div className="text-center py-12">
+                  <p className="text-slate-500 text-sm">Nenhum commit encontrado para este dia.</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Footer */}
       <footer className="border-t border-slate-900 bg-slate-950 px-6 py-6 text-center text-xs text-slate-600 mt-12">
-        <p>© 2026 Git Chronos. Criado para simulações e manipulações de datas locais do Git.</p>
+        <p>© 2026 Git Chronos. Gerencie seu histórico de contribuições na nuvem.</p>
       </footer>
     </div>
   );

@@ -3,149 +3,143 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
 import path from "path";
+import os from "os";
 
 const execAsync = promisify(exec);
 
 export async function POST(req: NextRequest) {
+  const token = req.cookies.get("github_token")?.value;
+
+  if (!token) {
+    return NextResponse.json(
+      { error: "Usuário não autenticado. Faça login com o GitHub." },
+      { status: 401 }
+    );
+  }
+
+  let tmpDir = "";
+  const logs: string[] = [];
+
   try {
     const body = await req.json();
-    const { 
-      action, 
-      repoPath, 
-      commits, 
-      message, 
-      initRepoName, 
-      pushToGithub, 
-      githubRepoUrl, 
-      githubBranch, 
-      forcePush 
-    } = body;
+    const { repoFullName, branch, commits, forcePush } = body;
 
-    if (!repoPath) {
-      return NextResponse.json({ error: "O caminho do repositório é obrigatório." }, { status: 400 });
+    if (!repoFullName) {
+      return NextResponse.json(
+        { error: "Selecione um repositório de destino." },
+        { status: 400 }
+      );
     }
 
-    const resolvedPath = path.resolve(repoPath);
-
-    // Ação de inicialização do repositório
-    if (action === "init") {
-      const targetDir = initRepoName ? path.join(resolvedPath, initRepoName) : resolvedPath;
-
-      if (!fs.existsSync(targetDir)) {
-        fs.mkdirSync(targetDir, { recursive: true });
-      }
-
-      // Verifica se já está inicializado
-      const isGit = fs.existsSync(path.join(targetDir, ".git"));
-      if (!isGit) {
-        await execAsync("git init", { cwd: targetDir });
-      }
-
-      return NextResponse.json({
-        success: true,
-        message: `Repositório inicializado com sucesso em: ${targetDir}`,
-        path: targetDir,
-      });
+    if (!commits || !Array.isArray(commits) || commits.length === 0) {
+      return NextResponse.json(
+        { error: "Nenhum commit foi especificado. Selecione pelo menos um dia no gráfico." },
+        { status: 400 }
+      );
     }
 
-    // Ação de criação de commits
-    if (action === "commit") {
-      if (!fs.existsSync(resolvedPath)) {
-        return NextResponse.json({ error: "O diretório especificado não existe." }, { status: 400 });
+    const targetBranch = branch || "main";
+
+    // 1. Criar pasta temporária
+    tmpDir = path.join(os.tmpdir(), `gitchronos-commit-${Date.now()}`);
+    fs.mkdirSync(tmpDir, { recursive: true });
+    logs.push(`Pasta temporária criada no servidor.`);
+
+    // 2. Clonar o repositório usando o token de acesso
+    const cloneUrl = `https://${token}@github.com/${repoFullName}.git`;
+    logs.push(`Clonando repositório ${repoFullName}...`);
+
+    await execAsync(`git clone "${cloneUrl}" repo`, {
+      cwd: tmpDir,
+      timeout: 120000, // 2 minutos de timeout para repos grandes
+    });
+
+    const repoDir = path.join(tmpDir, "repo");
+    logs.push("Repositório clonado com sucesso.");
+
+    // 3. Checkout da branch correta
+    try {
+      await execAsync(`git checkout ${targetBranch}`, { cwd: repoDir });
+      logs.push(`Branch '${targetBranch}' selecionada.`);
+    } catch {
+      // Se a branch não existir, cria uma nova
+      try {
+        await execAsync(`git checkout -b ${targetBranch}`, { cwd: repoDir });
+        logs.push(`Branch '${targetBranch}' criada.`);
+      } catch {
+        logs.push(`Aviso: Usando branch padrão do repositório.`);
       }
-
-      if (!fs.existsSync(path.join(resolvedPath, ".git"))) {
-        return NextResponse.json({ error: "O diretório não é um repositório Git válido. Inicialize-o primeiro." }, { status: 400 });
-      }
-
-      if (!commits || !Array.isArray(commits) || commits.length === 0) {
-        return NextResponse.json({ error: "Nenhum commit foi especificado." }, { status: 400 });
-      }
-
-      const logs: string[] = [];
-      let totalCreated = 0;
-
-      // Executa a criação de todos os commits locais
-      for (const item of commits) {
-        const { date, count } = item;
-        const commitMsg = item.message || message || "chore: update history";
-        const commitCount = count || 1;
-
-        const formattedDate = new Date(date).toISOString();
-
-        for (let i = 0; i < commitCount; i++) {
-          const env = {
-            ...process.env,
-            GIT_AUTHOR_DATE: formattedDate,
-            GIT_COMMITTER_DATE: formattedDate,
-          };
-
-          const cmd = `git commit --allow-empty -m "${commitMsg.replace(/"/g, '\\"')}"`;
-          await execAsync(cmd, { cwd: resolvedPath, env });
-          totalCreated++;
-        }
-        logs.push(`Criado(s) ${commitCount} commit(s) em ${new Date(date).toLocaleDateString()} ${new Date(date).toLocaleTimeString()}`);
-      }
-
-      // Executa o Push automático para o GitHub caso solicitado
-      if (pushToGithub && githubRepoUrl) {
-        const token = req.cookies.get("github_token")?.value;
-
-        if (!token) {
-          return NextResponse.json({ 
-            success: true,
-            message: `Commits criados localmente (${totalCreated}), mas o Push falhou: Usuário não autenticado.`,
-            logs: [...logs, "Erro: Token de acesso do GitHub não encontrado. Conecte sua conta."]
-          });
-        }
-
-        // Formata a URL do repositório injetando o token de acesso
-        let authenticatedUrl = githubRepoUrl;
-        if (githubRepoUrl.startsWith("https://github.com/")) {
-          authenticatedUrl = githubRepoUrl.replace("https://github.com/", `https://${token}@github.com/`);
-        }
-
-        const targetBranch = githubBranch || "main";
-        const forceFlag = forcePush ? "--force" : "";
-        logs.push(`Iniciando push para ${githubRepoUrl} (branch: ${targetBranch})...`);
-
-        try {
-          // Renomeia branch local para bater com a branch de destino se necessário
-          // (Garante que HEAD aponte para a branch correta localmente antes do push)
-          try {
-            await execAsync(`git checkout -b ${targetBranch}`, { cwd: resolvedPath });
-          } catch {
-            await execAsync(`git checkout ${targetBranch}`, { cwd: resolvedPath });
-          }
-
-          const pushCmd = `git push "${authenticatedUrl}" ${targetBranch} ${forceFlag}`;
-          await execAsync(pushCmd, { cwd: resolvedPath });
-          logs.push(`Push executado com sucesso para a branch ${targetBranch}!`);
-        } catch (pushErr: any) {
-          console.error("Erro ao fazer push:", pushErr);
-          logs.push(`Erro no Push: ${pushErr.message || "Erro desconhecido"}`);
-          return NextResponse.json({
-            success: true,
-            message: `Commits criados localmente (${totalCreated}), mas o push para o GitHub falhou.`,
-            logs,
-          });
-        }
-      }
-
-      return NextResponse.json({
-        success: true,
-        message: pushToGithub 
-          ? `Sucesso! ${totalCreated} commits criados e enviados para o GitHub.`
-          : `Sucesso! ${totalCreated} commits criados localmente.`,
-        logs,
-      });
     }
 
-    return NextResponse.json({ error: "Ação inválida." }, { status: 400 });
+    // 4. Criar todos os commits retroativos
+    let totalCreated = 0;
+
+    for (const item of commits) {
+      const { date, count, message } = item;
+      const commitMsg = message || "chore: update history";
+      const commitCount = count || 1;
+      const formattedDate = new Date(date).toISOString();
+
+      const env = {
+        ...process.env,
+        GIT_AUTHOR_DATE: formattedDate,
+        GIT_COMMITTER_DATE: formattedDate,
+      };
+
+      for (let i = 0; i < commitCount; i++) {
+        const cmd = `git commit --allow-empty -m "${commitMsg.replace(/"/g, '\\"')}"`;
+        await execAsync(cmd, { cwd: repoDir, env });
+        totalCreated++;
+      }
+
+      logs.push(
+        `Criado(s) ${commitCount} commit(s) em ${new Date(date).toLocaleDateString("pt-BR")} ${new Date(date).toLocaleTimeString("pt-BR")}`
+      );
+    }
+
+    logs.push(`Total: ${totalCreated} commits criados.`);
+
+    // 5. Push para o GitHub
+    const forceFlag = forcePush ? "--force" : "";
+    logs.push(`Enviando para ${repoFullName} (branch: ${targetBranch})...`);
+
+    await execAsync(
+      `git push origin ${targetBranch} ${forceFlag}`,
+      { cwd: repoDir, timeout: 60000 }
+    );
+
+    logs.push("Push executado com sucesso!");
+
+    // 6. Limpar pasta temporária
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      logs.push("Pasta temporária removida.");
+    } catch {
+      logs.push("Aviso: Não foi possível remover a pasta temporária.");
+    }
+
+    return NextResponse.json({
+      success: true,
+      message: `Sucesso! ${totalCreated} commits criados e enviados para ${repoFullName}.`,
+      logs,
+    });
   } catch (error: any) {
     console.error("Erro na API de commits:", error);
+
+    // Tentar limpar a pasta temporária em caso de erro
+    if (tmpDir) {
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      } catch {
+        // Ignora erro na limpeza
+      }
+    }
+
     return NextResponse.json(
-      { error: error.message || "Ocorreu um erro interno no servidor." },
+      {
+        error: error.message || "Ocorreu um erro interno no servidor.",
+        logs,
+      },
       { status: 500 }
     );
   }
