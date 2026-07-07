@@ -91,14 +91,27 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 4. Criar todos os commits retroativos
+    // 4. Criar todos os commits retroativos (com alterações reais no CHANGELOG.md)
     let totalCreated = 0;
+    const changelogPath = path.join(repoDir, "CHANGELOG.md");
+
+    // Criar CHANGELOG.md se não existir
+    if (!fs.existsSync(changelogPath)) {
+      fs.writeFileSync(
+        changelogPath,
+        "# Changelog\n\nTodas as alterações notáveis deste projeto serão documentadas neste arquivo.\n\n",
+        "utf-8"
+      );
+      logs.push("Arquivo CHANGELOG.md criado.");
+    }
 
     for (const item of commits) {
       const { date, count, message } = item;
       const commitMsg = message || "chore: update history";
       const commitCount = count || 1;
       const formattedDate = new Date(date).toISOString();
+      const readableDate = new Date(date).toLocaleDateString("pt-BR");
+      const readableTime = new Date(date).toLocaleTimeString("pt-BR");
 
       const env = {
         ...process.env,
@@ -111,17 +124,27 @@ export async function POST(req: NextRequest) {
       };
 
       for (let i = 0; i < commitCount; i++) {
-        const cmd = `git commit --allow-empty -m "${commitMsg.replace(/"/g, '\\"')}"`;
+        // Gerar um hash curto único para cada entrada
+        const uniqueHash = Math.random().toString(36).substring(2, 8);
+        const timestamp = new Date(date).toISOString();
+
+        // Adicionar entrada ao CHANGELOG.md
+        const entry = `\n## [${readableDate} ${readableTime}] - ${uniqueHash}\n\n- ${commitMsg}\n- Timestamp: ${timestamp}\n- Ref: ${uniqueHash}\n`;
+        fs.appendFileSync(changelogPath, entry, "utf-8");
+
+        // Adicionar e commitar
+        await execAsync(`git add CHANGELOG.md`, { cwd: repoDir, env });
+        const cmd = `git commit -m "${commitMsg.replace(/"/g, '\\"')}"`;
         await execAsync(cmd, { cwd: repoDir, env });
         totalCreated++;
       }
 
       logs.push(
-        `Criado(s) ${commitCount} commit(s) em ${new Date(date).toLocaleDateString("pt-BR")} ${new Date(date).toLocaleTimeString("pt-BR")}`
+        `Criado(s) ${commitCount} commit(s) em ${readableDate} ${readableTime}`
       );
     }
 
-    logs.push(`Total: ${totalCreated} commits criados.`);
+    logs.push(`Total: ${totalCreated} commits criados (com alterações em CHANGELOG.md).`);
 
     // 5. Push para o GitHub
     const forceFlag = forcePush ? "--force" : "";
